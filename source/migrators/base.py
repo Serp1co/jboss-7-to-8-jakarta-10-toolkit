@@ -3,7 +3,7 @@ import logging
 from typing import Optional
 
 from trio import Path
-from source.models.migrator import MigrationConfig, MigrationResult
+from models.migrator import MigrationConfig, MigrationResult
 
 
 class BaseMigrator(abc.ABC):

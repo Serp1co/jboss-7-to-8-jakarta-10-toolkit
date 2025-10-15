@@ -2,10 +2,10 @@ import logging
 from typing import Any, Dict, List, Optional, Set
 
 from trio import Path
-from source.migrators.base import BaseMigrator
-from source.migrators.java import JavaNamespaceMigrator
-from source.migrators.pom import PomDependencyMigrator
-from source.models.migrator import MigrationConfig, MigrationResult, MigrationType
+from migrators.base import BaseMigrator
+from migrators.java import JavaNamespaceMigrator
+from migrators.pom import PomDependencyMigrator
+from models.migrator import MigrationConfig, MigrationResult, MigrationType
 
 
 class MigrationEngine:

@@ -2,8 +2,8 @@ import logging
 from typing import Optional
 
 from trio import Path
-from source.migrators.base import BaseMigrator
-from source.models.migrator import MigrationConfig, MigrationResult
+from migrators.base import BaseMigrator
+from models.migrator import MigrationConfig, MigrationResult
 import xml.etree.ElementTree as ET
 
 

@@ -1,7 +1,7 @@
 import json
 from trio import Path
 
-from source.models.migrator import MigrationConfig
+from models.migrator import MigrationConfig
 
 
 class ConfigurationLoader:

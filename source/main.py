@@ -7,9 +7,9 @@ import logging
 import argparse
 from pathlib import Path
 
-from source.config_loader import ConfigurationLoader
-from source.migration_engine import MigrationEngine
-from source.models.migrator import MigrationConfig, MigrationType
+from config_loader import ConfigurationLoader
+from migration_engine import MigrationEngine
+from models.migrator import MigrationConfig, MigrationType
 
 def setup_logging(verbose: bool) -> logging.Logger:
     """Setup logging configuration."""
