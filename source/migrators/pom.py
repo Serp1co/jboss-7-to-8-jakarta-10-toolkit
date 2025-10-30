@@ -49,15 +49,15 @@ class PomDependencyMigrator(BaseMigrator):
             
             replacement_details = []
             
-            # Phase 1: Update BOMs
-            self.logger.debug("Phase 1: Updating BOMs")
-            bom_changes = self._update_boms(root)
-            replacement_details.extend(bom_changes)
+            # Phase 1: Update dependencyManagement section (BOMs and regular dependencies)
+            self.logger.debug("Phase 1: Updating dependencyManagement")
+            dep_mgmt_changes = self._update_dependency_management(root)
+            replacement_details.extend(dep_mgmt_changes)
             
             # Phase 2: Extract active BOMs
             active_boms = self._extract_active_boms(root)
             
-            # Phase 3: Migrate dependencies
+            # Phase 3: Migrate regular dependencies
             self.logger.debug("Phase 2: Migrating dependencies")
             dep_changes = self._migrate_dependencies(root)
             replacement_details.extend(dep_changes)
@@ -164,8 +164,8 @@ class PomDependencyMigrator(BaseMigrator):
             "org.wildfly.security:wildfly-elytron",
         }
     
-    def _update_boms(self, root: ET.Element) -> List[Dict]:
-        """Update BOMs in dependencyManagement section."""
+    def _update_dependency_management(self, root: ET.Element) -> List[Dict]:
+        """Update both BOMs and regular dependencies in dependencyManagement section."""
         changes = []
         
         dep_mgmt = root.find('.//maven:dependencyManagement', self.namespaces)
@@ -177,42 +177,60 @@ class PomDependencyMigrator(BaseMigrator):
         for dep in dependencies:
             scope_elem = dep.find('maven:scope', self.namespaces)
             type_elem = dep.find('maven:type', self.namespaces)
+            group_id = dep.find('maven:groupId', self.namespaces)
+            artifact_id = dep.find('maven:artifactId', self.namespaces)
+            version = dep.find('maven:version', self.namespaces)
             
-            # Check if it's a BOM
-            if (scope_elem is not None and scope_elem.text == 'import' and
-                type_elem is not None and type_elem.text == 'pom'):
+            if group_id is None or artifact_id is None:
+                continue
+            
+            old_key = f"{group_id.text}:{artifact_id.text}"
+            
+            # Check if it's a BOM (scope=import, type=pom)
+            is_bom = (scope_elem is not None and scope_elem.text == 'import' and
+                     type_elem is not None and type_elem.text == 'pom')
+            
+            # Check if this dependency needs migration
+            if old_key in self.config.eap7_to_eap8_dependencies:
+                mapping = self.config.eap7_to_eap8_dependencies[old_key]
                 
-                group_id = dep.find('maven:groupId', self.namespaces)
-                artifact_id = dep.find('maven:artifactId', self.namespaces)
-                version = dep.find('maven:version', self.namespaces)
-                
-                if group_id is not None and artifact_id is not None:
-                    old_key = f"{group_id.text}:{artifact_id.text}"
+                if 'new_artifact' in mapping:
+                    new_group, new_artifact = mapping['new_artifact'].split(':')
                     
-                    # Check if this BOM needs migration
-                    if old_key in self.config.eap7_to_eap8_dependencies:
-                        mapping = self.config.eap7_to_eap8_dependencies[old_key]
+                    if group_id.text != new_group:
+                        group_id.text = new_group
+                    
+                    if artifact_id.text != new_artifact:
+                        artifact_id.text = new_artifact
+                
+                # For BOMs, we might want to update version
+                # For regular dependencies in dependencyManagement, keep the version
+                if is_bom and 'new_version' in mapping and version is not None:
+                    # Only update BOM version if not a property reference
+                    if not (version.text and version.text.startswith('${') and version.text.endswith('}')):
+                        old_version = version.text
+                        version.text = mapping['new_version']
                         
-                        if 'new_artifact' in mapping:
-                            new_group, new_artifact = mapping['new_artifact'].split(':')
-                            
-                            if group_id.text != new_group:
-                                group_id.text = new_group
-                            
-                            if artifact_id.text != new_artifact:
-                                artifact_id.text = new_artifact
-                        
-                        if 'new_version' in mapping and version is not None:
-                            # Only update if not a property reference
-                            if not (version.text and version.text.startswith('${') and version.text.endswith('}')):
-                                old_version = version.text
-                                version.text = mapping['new_version']
-                                
-                                changes.append({
-                                    'type': 'bom_update',
-                                    'old': f"{old_key}:{old_version}",
-                                    'new': f"{mapping.get('new_artifact', old_key)}:{mapping['new_version']}"
-                                })
+                        changes.append({
+                            'type': 'bom_update',
+                            'old': f"{old_key}:{old_version}",
+                            'new': f"{mapping.get('new_artifact', old_key)}:{mapping['new_version']}"
+                        })
+                    else:
+                        changes.append({
+                            'type': 'bom_update',
+                            'old': old_key,
+                            'new': mapping.get('new_artifact', old_key),
+                            'note': 'Version managed by property'
+                        })
+                else:
+                    # Regular dependency in dependencyManagement
+                    changes.append({
+                        'type': 'dependency_management_update',
+                        'old': old_key,
+                        'new': mapping.get('new_artifact', old_key),
+                        'version_kept': version.text if version is not None else 'none'
+                    })
         
         return changes
     
@@ -248,35 +266,44 @@ class PomDependencyMigrator(BaseMigrator):
         return boms
     
     def _migrate_dependencies(self, root: ET.Element) -> List[Dict]:
-        """Migrate dependency artifacts."""
+        """Migrate dependency artifacts in the regular dependencies section."""
         changes = []
         
+        # Find all dependencies (not in dependencyManagement)
         dependencies = root.findall('.//maven:dependencies/maven:dependency', self.namespaces)
         
         for dep in dependencies:
-            group_id = dep.find('maven:groupId', self.namespaces)
-            artifact_id = dep.find('maven:artifactId', self.namespaces)
-            
-            if group_id is not None and artifact_id is not None:
-                old_key = f"{group_id.text}:{artifact_id.text}"
+            # Skip dependencies that are inside dependencyManagement
+            parent = dep
+            while parent is not None:
+                parent = parent.find('..')
+                if parent is not None and parent.tag.endswith('dependencyManagement'):
+                    break
+            else:
+                # This dependency is not in dependencyManagement
+                group_id = dep.find('maven:groupId', self.namespaces)
+                artifact_id = dep.find('maven:artifactId', self.namespaces)
                 
-                if old_key in self.config.eap7_to_eap8_dependencies:
-                    mapping = self.config.eap7_to_eap8_dependencies[old_key]
+                if group_id is not None and artifact_id is not None:
+                    old_key = f"{group_id.text}:{artifact_id.text}"
                     
-                    if 'new_artifact' in mapping:
-                        new_group, new_artifact = mapping['new_artifact'].split(':')
+                    if old_key in self.config.eap7_to_eap8_dependencies:
+                        mapping = self.config.eap7_to_eap8_dependencies[old_key]
                         
-                        if group_id.text != new_group:
-                            group_id.text = new_group
-                        
-                        if artifact_id.text != new_artifact:
-                            artifact_id.text = new_artifact
-                        
-                        changes.append({
-                            'type': 'dependency_migration',
-                            'old': old_key,
-                            'new': mapping['new_artifact']
-                        })
+                        if 'new_artifact' in mapping:
+                            new_group, new_artifact = mapping['new_artifact'].split(':')
+                            
+                            if group_id.text != new_group:
+                                group_id.text = new_group
+                            
+                            if artifact_id.text != new_artifact:
+                                artifact_id.text = new_artifact
+                            
+                            changes.append({
+                                'type': 'dependency_migration',
+                                'old': old_key,
+                                'new': mapping['new_artifact']
+                            })
         
         return changes
     
@@ -293,29 +320,37 @@ class PomDependencyMigrator(BaseMigrator):
         if not has_eap_bom:
             return changes
         
+        # Only process regular dependencies (not in dependencyManagement)
         dependencies = root.findall('.//maven:dependencies/maven:dependency', self.namespaces)
         
         for dep in dependencies:
-            group_id = dep.find('maven:groupId', self.namespaces)
-            artifact_id = dep.find('maven:artifactId', self.namespaces)
-            version = dep.find('maven:version', self.namespaces)
-            
-            if group_id is not None and artifact_id is not None and version is not None:
-                dep_key = f"{group_id.text}:{artifact_id.text}"
+            # Skip dependencies inside dependencyManagement
+            parent = dep
+            while parent is not None:
+                parent = parent.find('..')
+                if parent is not None and parent.tag.endswith('dependencyManagement'):
+                    break
+            else:
+                group_id = dep.find('maven:groupId', self.namespaces)
+                artifact_id = dep.find('maven:artifactId', self.namespaces)
+                version = dep.find('maven:version', self.namespaces)
                 
-                # Check if managed
-                if dep_key in self.managed_dependencies:
-                    # Don't remove property references
-                    if not (version.text and version.text.startswith('${') and version.text.endswith('}')):
-                        old_version = version.text
-                        dep.remove(version)
-                        
-                        changes.append({
-                            'type': 'version_removed',
-                            'dependency': dep_key,
-                            'old_version': old_version,
-                            'reason': 'Managed by BOM'
-                        })
+                if group_id is not None and artifact_id is not None and version is not None:
+                    dep_key = f"{group_id.text}:{artifact_id.text}"
+                    
+                    # Check if managed
+                    if dep_key in self.managed_dependencies:
+                        # Don't remove property references
+                        if not (version.text and version.text.startswith('${') and version.text.endswith('}')):
+                            old_version = version.text
+                            dep.remove(version)
+                            
+                            changes.append({
+                                'type': 'version_removed',
+                                'dependency': dep_key,
+                                'old_version': old_version,
+                                'reason': 'Managed by BOM'
+                            })
         
         return changes
     
